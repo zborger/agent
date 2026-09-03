@@ -27,8 +27,14 @@
 
 ---
 
+## 阶段 1 · 最小 loop 跑通 ✅
+
+- `npm run ping` 通了：确认调 LLM = 一次 HTTP POST，回答在 `choices[0].message.content`。
+- `smoke.ts` 冒烟测试通过：问"tsconfig 的 target 是什么" → agent 自主调 `readFile` → 读到内容 → 答出 `ES2022`。完整 ReAct 循环成立。
+- 踩坑：PowerShell 控制台默认 GBK，Node 输出 UTF-8，中文乱码。跑之前设 `[Console]::OutputEncoding=UTF8` 即可，数据本身没问题。
+- 注意：v4 模型响应里带 `reasoning_content`（思考过程），以后可利用。
+
 ## 待办 / 下一步
 
-- [ ] 填 DeepSeek key，跑通 `npm run ping`（第一次真实调用）。
-- [ ] 跑 `npm run agent`，用 readFile 工具体验完整 ReAct 循环。
-- [ ] 故意给多步任务，观察 messages 膨胀 → 引出上下文管理。
+- [ ] 故意给多步任务，观察 messages 膨胀 → 引出上下文管理（下一堵墙）。
+- [ ] 可能加更多工具（写文件、执行命令），让 agent 能真正操作项目。
