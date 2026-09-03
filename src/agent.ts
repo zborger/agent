@@ -14,15 +14,8 @@
 import { readFile as fsReadFile } from "node:fs/promises";
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-
-const API_KEY = process.env.DEEPSEEK_API_KEY;
-const BASE_URL = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
-const MODEL = process.env.DEEPSEEK_MODEL ?? "deepseek-chat";
-
-if (!API_KEY) {
-  console.error("没读到 DEEPSEEK_API_KEY。确认 .env 里填了 key，并用 npm run agent 启动。");
-  process.exit(1);
-}
+// 调 LLM 的逻辑（含错误分类 + 重试）统一放在 llm.ts，这里直接用。
+import { callLLM, LLMError } from "./llm.ts";
 
 // ────────────────────────────────────────────────────────────────
 // 第 1 部分：工具（tools）—— agent 的"手脚"
@@ -58,33 +51,8 @@ const toolImplementations: Record<string, (args: any) => Promise<string>> = {
 };
 
 // ────────────────────────────────────────────────────────────────
-// 第 2 部分：调用 LLM —— 就是 ping.ts 里那个 HTTP 请求，多带了 tools
-// ────────────────────────────────────────────────────────────────
-
-async function callLLM(messages: any[]) {
-  const response = await fetch(`${BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      messages,
-      tools: toolSchemas, // 关键：把工具说明书一起发过去
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`LLM 请求失败: ${response.status} ${await response.text()}`);
-  }
-
-  const data = await response.json();
-  return data.choices[0].message; // 返回模型这一轮说的话（可能含 tool_calls）
-}
-
-// ────────────────────────────────────────────────────────────────
-// 第 3 部分：agent 循环 —— 灵魂所在
+// 第 2 部分：agent 循环 —— 灵魂所在
+//   注意：调 LLM 现在用 llm.ts 里的 callLLM（自带错误分类和重试）。
 // ────────────────────────────────────────────────────────────────
 
 async function runAgent(messages: any[]) {
@@ -92,8 +60,8 @@ async function runAgent(messages: any[]) {
   const MAX_STEPS = 10;
 
   for (let step = 0; step < MAX_STEPS; step++) {
-    // 【第 1 步】把历史 + 工具发给 LLM
-    const reply = await callLLM(messages);
+    // 【第 1 步】把历史 + 工具发给 LLM（tools 通过 options 传进去）
+    const reply = await callLLM(messages, { tools: toolSchemas });
 
     // 把 LLM 这一轮的发言加进历史（不管它是要调工具还是给答案，都得记下来）
     messages.push(reply);
@@ -151,8 +119,22 @@ async function main() {
     if (userInput.trim().toLowerCase() === "exit") break;
 
     messages.push({ role: "user", content: userInput });
-    const answer = await runAgent(messages);
-    console.log(`agent: ${answer}\n`);
+
+    try {
+      const answer = await runAgent(messages);
+      console.log(`agent: ${answer}\n`);
+    } catch (err) {
+      if (err instanceof LLMError) {
+        // 按分类给不同提示。致命的配置类错误直接退出，没必要继续。
+        console.error(`\n[LLM 错误 / ${err.category}] ${err.message}\n`);
+        if (!err.retryable) {
+          console.error("这是配置类错误，重试也没用，先退出。修正后重新启动。");
+          break;
+        }
+      } else {
+        console.error("\n[意外错误]", err, "\n");
+      }
+    }
   }
 
   rl.close();

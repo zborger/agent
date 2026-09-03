@@ -10,7 +10,7 @@
 // 从环境变量读 key（我们等下用 --env-file 把 .env 注入进来）。
 const API_KEY = process.env.DEEPSEEK_API_KEY;
 const BASE_URL = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
-const MODEL = process.env.DEEPSEEK_MODEL ?? "deepseek-chat";
+const MODEL = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
 
 if (!API_KEY) {
   console.error("没读到 DEEPSEEK_API_KEY。确认 .env 里填了 key，并且用 npm run ping 启动。");
