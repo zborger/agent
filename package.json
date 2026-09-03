@@ -1,0 +1,16 @@
+{
+  "name": "my-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "从零手写的最小 agent loop —— 学习用",
+  "scripts": {
+    "agent": "node --env-file=.env --import tsx src/agent.ts",
+    "ping": "node --env-file=.env --import tsx src/ping.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
