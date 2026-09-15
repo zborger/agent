@@ -34,7 +34,22 @@
 - 踩坑：PowerShell 控制台默认 GBK，Node 输出 UTF-8，中文乱码。跑之前设 `[Console]::OutputEncoding=UTF8` 即可，数据本身没问题。
 - 注意：v4 模型响应里带 `reasoning_content`（思考过程），以后可利用。
 
+## 阶段 2 · 扩展工具 + 深化理解
+
+- 加了 `writeFile` 工具：改两处（toolSchemas 说明书 + toolImplementations 真身）+ 顶部 import。验证了"改 schema → agent 的自我认知和能力就变"。
+- 工具必须 `return` 一句有意义的结果 → 被 push 回 messages(role:tool) → 模型据此判断"这步成没成"、决定下一步。工具结果 = loop 的"观察"环节。
+
+## 关键认知（第二批）
+
+- **响应分两层**：外层信封(choices/message/role/tool_calls结构)由厂商服务端代码保证 100% 稳定；内层内容(content文字、arguments值)才是模型概率生成、可能出错。
+- **function calling 是训练出来的**：模型经过后训练学会"看到 tools schema 就按格式输出 tool_call"。所以 schema 描述越清晰，输出越准 —— 但永远是高概率、非保证，代码要处处兜底(JSON.parse 可能失败、工具名可能是幻觉)。
+- **入参必须结构化**：messages 每条必须带 role(system/user/assistant/tool)，不能是裸文本；服务端先校验格式(不合格直接 400/422 不进模型)。
+- **loop 结束判据是"没有 tool_calls"，不是"有 content"**（模型可能边说话边调工具，两者同时存在）。是模型自己决定走几步、何时停 —— 这就是自主性来源。
+- **双循环心智**：外层 = CLI/对话循环(在 main，人驱动，靠 "exit" 字符串退出，是可替换的壳)；内层 = agent loop(在 runAgent，模型驱动，靠 tool_calls 退出，是不可替换的核)。换 HTTP/定时任务等外壳只动外层，runAgent 不变。
+- **loop 是骨架但不是难点**：真正的工程价值在 loop 之外(memory 压缩、runtime 容错、tool 设计)。类比：请求-响应循环之于 Web 服务器。
+
 ## 待办 / 下一步
 
+- [x] 加更多工具（writeFile 已完成）。
 - [ ] 故意给多步任务，观察 messages 膨胀 → 引出上下文管理（下一堵墙）。
-- [ ] 可能加更多工具（写文件、执行命令），让 agent 能真正操作项目。
+- [ ] 给工具调用加兜底：未知工具名、坏 JSON 参数的防护。

@@ -11,7 +11,7 @@
  *   4. 回到第 1 步，带着新结果再问 LLM
  */
 
-import { readFile as fsReadFile } from "node:fs/promises";
+import { readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 // 调 LLM 的逻辑（含错误分类 + 重试）统一放在 llm.ts，这里直接用。
@@ -39,6 +39,21 @@ const toolSchemas = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "writeFile",
+      description: "把文本内容写入一个文件（若文件不存在则创建，存在则覆盖）。当用户要求创建文件或把内容保存到文件时使用。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "要写入的文件路径" },
+          content: { type: "string", description: "要写入文件的文本内容" },
+        },
+        required: ["path", "content"],
+      },
+    },
+  },
 ];
 
 // 1b. 工具的"真身"：真正干活的代码。名字要和上面 schema 里的 name 对上。
@@ -47,6 +62,11 @@ const toolImplementations: Record<string, (args: any) => Promise<string>> = {
   async readFile(args: { path: string }) {
     const content = await fsReadFile(args.path, "utf-8");
     return content;
+  },
+  async writeFile(args: { path: string; content: string }) {
+    await fsWriteFile(args.path, args.content, "utf-8");
+    // 工具要返回一个字符串结果喂回给模型，告诉它"干成了"。
+    return `已写入文件 ${args.path}（${args.content.length} 字符）`;
   },
 };
 
