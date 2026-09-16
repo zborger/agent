@@ -78,6 +78,22 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * token 用量。prompt_tokens 就是"这一轮发过去的 messages 有多大"的直接度量，
+ * 观察它随轮次递增，就能看到"上下文膨胀"这堵墙。
+ */
+export interface Usage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+/** callLLM 的返回值：模型这轮的消息 + 本次调用的 token 用量 */
+export interface LLMResult {
+  message: any;
+  usage: Usage;
+}
+
+/**
  * 调用 LLM 的 /chat/completions，自带对"可重试"错误的指数退避重试。
  *
  * @param messages 完整对话历史（记忆靠调用方维护并整段传入）
@@ -89,7 +105,7 @@ function sleep(ms: number): Promise<void> {
 export async function callLLM(
   messages: any[],
   options: { tools?: any[]; maxRetries?: number } = {},
-): Promise<any> {
+): Promise<LLMResult> {
   if (!API_KEY) {
     throw new LLMError("没读到 DEEPSEEK_API_KEY。确认 .env 里填了 key，并用 npm 脚本启动。", 0, false, "auth");
   }
@@ -127,7 +143,12 @@ export async function callLLM(
 
     if (response.ok) {
       const data = await response.json();
-      return data.choices[0].message;
+      // 把 message 和 usage 一起返回。usage 交给调用方决定怎么用（打印/累加/告警），
+      // 底层不做打印决定 —— 这样 llm.ts 保持纯粹，只负责"调用+返回数据"。
+      return {
+        message: data.choices[0].message,
+        usage: data.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      };
     }
 
     // 非 2xx：分类
