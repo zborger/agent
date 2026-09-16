@@ -11,7 +11,8 @@
  *   4. 回到第 1 步，带着新结果再问 LLM
  */
 
-import { readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
+import { readFile as fsReadFile, writeFile as fsWriteFile, readdir as fsReaddir } from "node:fs/promises";
+import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 // 调 LLM 的逻辑（含错误分类 + 重试）统一放在 llm.ts，这里直接用。
@@ -42,6 +43,21 @@ const toolSchemas = [
   {
     type: "function",
     function: {
+      name: "listFiles",
+      description:
+        "列出某个目录下的文件和子目录。当你不确定文件在哪、或需要了解项目结构时，先用这个工具探索，再决定读哪个文件。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: '要列出的目录路径，当前目录用 "."' },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "writeFile",
       description: "把文本内容写入一个文件（若文件不存在则创建，存在则覆盖）。当用户要求创建文件或把内容保存到文件时使用。",
       parameters: {
@@ -63,8 +79,28 @@ const toolImplementations: Record<string, (args: any) => Promise<string>> = {
     const content = await fsReadFile(args.path, "utf-8");
     return content;
   },
+  async listFiles(args: { path: string }) {
+    // withFileTypes 让我们能区分文件和目录 —— 模型需要这个信息才知道能不能继续往下钻。
+    const entries = await fsReaddir(args.path, { withFileTypes: true });
+    if (entries.length === 0) return `目录 ${args.path} 是空的`;
+
+    // 输出格式有讲究：目录加 / 后缀并标注，让模型一眼分清能钻的和能读的。
+    // 过滤掉 node_modules 和 .git —— 它们条目巨多，会瞬间灌满上下文。
+    const lines = entries
+      .filter((e) => e.name !== "node_modules" && e.name !== ".git")
+      .map((e) => (e.isDirectory() ? `${e.name}/  (目录)` : `${e.name}  (文件)`));
+    return `目录 ${args.path} 下有 ${lines.length} 项：\n` + lines.join("\n");
+  },
   async writeFile(args: { path: string; content: string }) {
-    await fsWriteFile(args.path, args.content, "utf-8");
+    // 【安全防护】模型是概率输出的，可能幻觉出 ../../../ 这类路径覆盖掉重要文件。
+    // 所以写之前必须校验：解析成绝对路径后，必须仍在项目目录内。
+    const projectRoot = process.cwd();
+    const target = path.resolve(projectRoot, args.path);
+    if (!target.startsWith(projectRoot)) {
+      // 注意：这里不抛异常，而是返回一句能让模型看懂的话，它才有机会自我纠正。
+      return `拒绝写入：路径 ${args.path} 超出了项目目录 ${projectRoot}，不允许写到外面。请改用项目内的相对路径。`;
+    }
+    await fsWriteFile(target, args.content, "utf-8");
     // 工具要返回一个字符串结果喂回给模型，告诉它"干成了"。
     return `已写入文件 ${args.path}（${args.content.length} 字符）`;
   },
@@ -126,16 +162,45 @@ async function runAgent(messages: any[]) {
     console.error(`[决策] 要调用 ${reply.tool_calls.length} 个工具: ${intents}`);
 
     // 【第 3 步】它要调工具。逐个执行，把结果塞回历史。
+    //
+    // 兜底原则：模型是概率输出的，一定会犯浑（幻觉工具名、生成坏 JSON、参数错）。
+    // 关键手法是——不要让程序崩，而是把错误"作为工具结果"喂回给模型，
+    // 让它看到自己错在哪，有机会自我纠正后重试。
     for (const toolCall of reply.tool_calls) {
       const name = toolCall.function.name;
-      const args = JSON.parse(toolCall.function.arguments);
-
       let result: string;
+
+      // 【兜底 1】参数是模型生成的 JSON 字符串，可能不合法。
+      // 原来 JSON.parse 在 try 外面，一旦解析失败整个程序直接崩。
+      let args: any;
       try {
-        result = await toolImplementations[name](args);
+        args = JSON.parse(toolCall.function.arguments);
+      } catch (err: any) {
+        result = `参数解析失败：你给的 arguments 不是合法 JSON（${err.message}）。原始内容：${toolCall.function.arguments}。请重新生成合法的 JSON 参数。`;
+        console.error(`[执行] ${name} → 参数 JSON 非法`);
+        messages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
+        continue; // 跳过执行，进入下一个 tool_call
+      }
+
+      // 【兜底 2】模型可能幻觉出一个不存在的工具名。
+      // 原来直接取 toolImplementations[name] 会得到 undefined，调用时崩。
+      const impl = toolImplementations[name];
+      if (!impl) {
+        const available = Object.keys(toolImplementations).join(", ");
+        result = `未知工具 "${name}"。可用的工具只有：${available}。请从中选择。`;
+        console.error(`[执行] ${name} → 工具不存在（幻觉）`);
+        messages.push({ role: "tool", tool_call_id: toolCall.id, content: result });
+        continue;
+      }
+
+      // 【兜底 3】工具本身执行可能出错（文件不存在、权限不足等）。
+      try {
+        result = await impl(args);
         // 只打印长度，不打印全文 —— 文件内容可能很长，刷屏且没必要
         console.error(`[执行] ${name} → 成功, 返回 ${result.length} 字符`);
       } catch (err: any) {
+        // 错误信息要对模型有用。比如 ENOENT 要让它知道"文件不存在"，
+        // 它才会想到"那我先 listFiles 看看有什么"。
         result = `工具执行出错: ${err.message}`;
         console.error(`[执行] ${name} → 失败: ${err.message}`);
       }
@@ -162,10 +227,23 @@ async function runAgent(messages: any[]) {
 async function main() {
   const rl = readline.createInterface({ input: stdin, output: stdout });
 
-  // messages 就是 agent 的"记忆"。第一条是 system 提示，定义它是谁。
-  const messages: any[] = [
-    { role: "system", content: "你是一个乐于助人的助手。你可以使用工具来完成任务。" },
-  ];
+  // messages 就是 agent 的"记忆"。第一条是 system 提示，定义它是谁 + 它所处的环境。
+  //
+  // 为什么要注入环境信息？模型对文件系统是"盲"的 —— 它不知道当前在哪个目录、
+  // 有哪些文件。不告诉它，它只能靠训练时的常识猜路径（经常猜错）。
+  // 告诉它工作目录 + 让它知道可以先 listFiles 探索，它就能"先看再做"。
+  const systemPrompt = [
+    "你是一个乐于助人的助手，可以使用工具来完成任务。",
+    "",
+    "当前环境：",
+    `- 工作目录：${process.cwd()}`,
+    `- 操作系统：${process.platform}`,
+    "",
+    "重要：文件路径都相对于上面的工作目录。如果你不确定某个文件在哪，",
+    "先用 listFiles 列目录探索，不要凭猜测直接读取。",
+  ].join("\n");
+
+  const messages: any[] = [{ role: "system", content: systemPrompt }];
 
   console.log("最小 agent 已启动。输入问题开始对话，输入 exit 退出。\n");
 
